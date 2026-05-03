@@ -17,7 +17,7 @@ interface Note {
   updatedAt: string;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
+const API = process.env.NEXT_PUBLIC_API_URL;
 
 const NOTE_COLORS = [
   "#f5f0e8", "#e8f0e8", "#e8eaf5", "#f5e8e8",
@@ -25,13 +25,17 @@ const NOTE_COLORS = [
 ];
 
 const apiFetch = async (path: string, options: RequestInit = {}) => {
-  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string> || {}),
   };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`${API}${path}`, { ...options, headers, credentials: "include" });
+  
+  const res = await fetch(`${API}${path}`, { 
+    ...options, 
+    headers, 
+    credentials: "include" 
+  });
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: "Network error" }));
     throw new Error(err.message || "Request failed");
@@ -52,7 +56,7 @@ const inputStyle: React.CSSProperties = {
   background: "#fff",
 };
 
-function AuthPage({ onAuth }: { onAuth: (user: User, token: string) => void }) {
+function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
   const [tab, setTab] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -64,19 +68,15 @@ function AuthPage({ onAuth }: { onAuth: (user: User, token: string) => void }) {
     setError("");
     setLoading(true);
     try {
-      if (tab === "login") {
-        const res = await apiFetch("/auth/login", {
-          method: "POST",
-          body: JSON.stringify({ email, password }),
-        });
-        onAuth(res.data.user, res.data.token);
-      } else {
-        const res = await apiFetch("/auth/register", {
-          method: "POST",
-          body: JSON.stringify({ name, email, password }),
-        });
-        onAuth(res.data.user, res.data.token);
-      }
+      const endpoint = tab === "login" ? "/auth/login" : "/auth/register";
+      const body = tab === "login" ? { email, password } : { name, email, password };
+      
+      const res = await apiFetch(endpoint, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      
+      onAuth(res.data.user || res.data);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -144,14 +144,8 @@ function AuthPage({ onAuth }: { onAuth: (user: User, token: string) => void }) {
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" style={inputStyle} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
           </div>
 
-          {tab === "login" && (
-            <div style={{ textAlign: "right", marginBottom: "20px" }}>
-              <span style={{ fontSize: "13px", color: "#1a4fa0", cursor: "pointer" }}>Forgot password?</span>
-            </div>
-          )}
-
           {error && (
-            <div style={{ background: "#fff0f0", border: "1px solid #fcc", borderRadius: "6px", padding: "10px 14px", color: "#c00", fontSize: "13px", marginBottom: "16px" }}>
+            <div style={{ background: "#fff0f0", border: "1px solid #fcc", borderRadius: "6px", padding: "10px 14px", color: "#c00", fontSize: "13px", marginBottom: "16px", marginTop: "10px" }}>
               {error}
             </div>
           )}
@@ -168,7 +162,7 @@ function AuthPage({ onAuth }: { onAuth: (user: User, token: string) => void }) {
             cursor: loading ? "not-allowed" : "pointer",
             opacity: loading ? 0.7 : 1,
             fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
-            marginTop: tab === "login" ? 0 : "16px",
+            marginTop: "20px",
           }}>
             {loading ? "Please wait..." : tab === "login" ? "Sign in" : "Create account"}
           </button>
@@ -284,7 +278,6 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
       background: "#1a1a1a",
       overflow: "hidden",
     }}>
-      {/* ── Sidebar ── */}
       <div style={{
         width: "240px",
         background: "#1a1a1a",
@@ -293,7 +286,6 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
         flexDirection: "column",
         flexShrink: 0,
       }}>
-        {/* Header */}
         <div style={{
           padding: "18px 16px 12px",
           display: "flex",
@@ -320,7 +312,6 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
           </div>
         </div>
 
-        {/* Greeting */}
         <div style={{ padding: "12px 14px 8px" }}>
           <div style={{ background: "#2d4a3e", borderRadius: "8px", padding: "10px 12px" }}>
             <div style={{ fontSize: "11px", color: "#6aaa80" }}>Hi, {user.name.split(" ")[0]}!</div>
@@ -330,7 +321,6 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
           </div>
         </div>
 
-        {/* Note list */}
         <div style={{ flex: 1, overflowY: "auto", padding: "4px 8px" }}>
           {loading ? (
             <div style={{ padding: "20px 8px", color: "#555", fontSize: "13px" }}>Loading...</div>
@@ -382,10 +372,8 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
       </div>
 
-      {/* ── Editor ── */}
       {activeNote ? (
         <div style={{ flex: 1, background: activeNote.color, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          {/* Toolbar */}
           <div style={{
             padding: "10px 20px",
             borderBottom: "1px solid rgba(0,0,0,0.08)",
@@ -416,7 +404,6 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
             </button>
           </div>
 
-          {/* Title */}
           <input
             value={activeNote.title}
             onChange={(e) => updateActive("title", e.target.value)}
@@ -429,7 +416,6 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
             }}
           />
 
-          {/* Content */}
           <textarea
             value={activeNote.content}
             onChange={(e) => updateActive("content", e.target.value)}
@@ -466,23 +452,26 @@ export default function Page() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    const saved = localStorage.getItem("user");
-    if (token && saved) {
-      try { setUser(JSON.parse(saved)); } catch { }
-    }
-    setReady(true);
+    const checkAuth = async () => {
+      try {
+        const res = await apiFetch("/auth/me");
+        setUser(res.data);
+      } catch {
+        setUser(null);
+      }
+      setReady(true);
+    };
+    checkAuth();
   }, []);
 
-  const handleAuth = (u: User, token: string) => {
-    localStorage.setItem("token", token);
-    localStorage.setItem("user", JSON.stringify(u));
+  const handleAuth = (u: User) => {
     setUser(u);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
+  const handleLogout = async () => {
+    try {
+      await apiFetch("/auth/logout");
+    } catch {}
     setUser(null);
   };
 
