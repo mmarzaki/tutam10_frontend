@@ -1,47 +1,121 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+
+// Types 
 
 interface User {
-  _id: string;
+  id: string;
   name: string;
   email: string;
+  passwordHash: string;
 }
 
 interface Note {
-  _id: string;
+  id: string;
+  userId: string;
   title: string;
   content: string;
   color: string;
   isPinned: boolean;
   updatedAt: string;
+  createdAt: string;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL;
+// LocalStorage DB
+
+const DB = {
+  getUsers: (): User[] => {
+    try { return JSON.parse(localStorage.getItem("notesapp_users") || "[]"); } catch { return []; }
+  },
+  saveUsers: (users: User[]) => {
+    localStorage.setItem("notesapp_users", JSON.stringify(users));
+  },
+  getNotes: (): Note[] => {
+    try { return JSON.parse(localStorage.getItem("notesapp_notes") || "[]"); } catch { return []; }
+  },
+  saveNotes: (notes: Note[]) => {
+    localStorage.setItem("notesapp_notes", JSON.stringify(notes));
+  },
+  getSession: (): string | null => localStorage.getItem("notesapp_session"),
+  setSession: (userId: string) => localStorage.setItem("notesapp_session", userId),
+  clearSession: () => localStorage.removeItem("notesapp_session"),
+};
+
+// Simple hash 
+const simpleHash = (str: string): string => {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (Math.imul(31, hash) + str.charCodeAt(i)) | 0;
+  }
+  return hash.toString(36);
+};
+
+const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+// Auth logic
+
+const authRegister = (name: string, email: string, password: string): User => {
+  const users = DB.getUsers();
+  if (users.find((u) => u.email.toLowerCase() === email.toLowerCase())) {
+    throw new Error("Email already registered");
+  }
+  if (password.length < 6) throw new Error("Password must be at least 6 characters");
+  const user: User = { id: uid(), name, email: email.toLowerCase(), passwordHash: simpleHash(password) };
+  DB.saveUsers([...users, user]);
+  return user;
+};
+
+const authLogin = (email: string, password: string): User => {
+  const users = DB.getUsers();
+  const user = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  if (!user || user.passwordHash !== simpleHash(password)) {
+    throw new Error("Invalid email or password");
+  }
+  return user;
+};
+
+// Notes logic
+
+const getNotesByUser = (userId: string): Note[] =>
+  DB.getNotes()
+    .filter((n) => n.userId === userId)
+    .sort((a, b) => {
+      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+
+const createNote = (userId: string): Note => {
+  const notes = getNotesByUser(userId);
+  if (notes.length >= 10) throw new Error("Maximum 10 notes allowed");
+  const note: Note = {
+    id: uid(), userId, title: "Untitled", content: "",
+    color: "#f5f0e8", isPinned: false,
+    updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(),
+  };
+  DB.saveNotes([...DB.getNotes(), note]);
+  return note;
+};
+
+const updateNote = (id: string, fields: Partial<Note>): Note => {
+  const all = DB.getNotes();
+  const idx = all.findIndex((n) => n.id === id);
+  if (idx === -1) throw new Error("Note not found");
+  all[idx] = { ...all[idx], ...fields, updatedAt: new Date().toISOString() };
+  DB.saveNotes(all);
+  return all[idx];
+};
+
+const deleteNote = (id: string) => {
+  DB.saveNotes(DB.getNotes().filter((n) => n.id !== id));
+};
+
+// Cosntants
 
 const NOTE_COLORS = [
   "#f5f0e8", "#e8f0e8", "#e8eaf5", "#f5e8e8",
   "#f5f5e8", "#e8f5f5", "#f0e8f5", "#f5ebe8",
 ];
-
-const apiFetch = async (path: string, options: RequestInit = {}) => {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(options.headers as Record<string, string> || {}),
-  };
-  
-  const res = await fetch(`${API}${path}`, { 
-    ...options, 
-    headers, 
-    credentials: "include" 
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: "Network error" }));
-    throw new Error(err.message || "Request failed");
-  }
-  return res.json();
-};
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
@@ -56,6 +130,8 @@ const inputStyle: React.CSSProperties = {
   background: "#fff",
 };
 
+// Auth page
+
 function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
   const [tab, setTab] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
@@ -64,24 +140,27 @@ function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = async () => {
+  const handleSubmit = () => {
     setError("");
-    setLoading(true);
-    try {
-      const endpoint = tab === "login" ? "/auth/login" : "/auth/register";
-      const body = tab === "login" ? { email, password } : { name, email, password };
-      
-      const res = await apiFetch(endpoint, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      
-      onAuth(res.data.user || res.data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+    if (!email || !password || (tab === "register" && !name)) {
+      setError("Please fill in all fields");
+      return;
     }
+    setLoading(true);
+    // Small timeout so button state renders
+    setTimeout(() => {
+      try {
+        const user = tab === "login"
+          ? authLogin(email, password)
+          : authRegister(name, email, password);
+        DB.setSession(user.id);
+        onAuth(user);
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    }, 50);
   };
 
   return (
@@ -100,16 +179,12 @@ function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
         overflow: "hidden",
         boxShadow: "0 4px 20px rgba(0,0,0,0.12)",
       }}>
+        {/* Tab headers */}
         <div style={{ display: "flex", borderBottom: "1px solid #e5e5e5" }}>
           {(["login", "register"] as const).map((t) => (
-            <button key={t} onClick={() => setTab(t)} style={{
-              flex: 1,
-              padding: "18px",
-              border: "none",
-              background: "none",
-              cursor: "pointer",
-              fontSize: "15px",
-              fontWeight: tab === t ? 700 : 400,
+            <button key={t} onClick={() => { setTab(t); setError(""); }} style={{
+              flex: 1, padding: "18px", border: "none", background: "none", cursor: "pointer",
+              fontSize: "15px", fontWeight: tab === t ? 700 : 400,
               color: tab === t ? "#1a4fa0" : "#888",
               borderBottom: tab === t ? "2px solid #1a4fa0" : "2px solid transparent",
               fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
@@ -119,6 +194,7 @@ function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
           ))}
         </div>
 
+        {/* Form */}
         <div style={{ padding: "36px 40px 40px" }}>
           <h2 style={{ margin: "0 0 6px", fontSize: "26px", fontWeight: 700, color: "#1a1a1a", textAlign: "center" }}>
             {tab === "login" ? "Welcome back" : "Create account"}
@@ -130,7 +206,7 @@ function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
           {tab === "register" && (
             <div style={{ marginBottom: "16px" }}>
               <label style={{ display: "block", fontSize: "11px", fontWeight: 700, letterSpacing: "0.08em", color: "#444", marginBottom: "6px" }}>NAME</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your full name" style={inputStyle} />
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your full name" style={inputStyle} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
             </div>
           )}
 
@@ -144,39 +220,46 @@ function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" style={inputStyle} onKeyDown={(e) => e.key === "Enter" && handleSubmit()} />
           </div>
 
+          {tab === "login" && (
+            <div style={{ textAlign: "right", marginBottom: "20px" }}>
+              <span style={{ fontSize: "13px", color: "#1a4fa0", cursor: "pointer" }}>Forgot password?</span>
+            </div>
+          )}
+
           {error && (
-            <div style={{ background: "#fff0f0", border: "1px solid #fcc", borderRadius: "6px", padding: "10px 14px", color: "#c00", fontSize: "13px", marginBottom: "16px", marginTop: "10px" }}>
+            <div style={{
+              background: "#fff0f0", border: "1px solid #fcc", borderRadius: "6px",
+              padding: "10px 14px", color: "#c00", fontSize: "13px",
+              marginBottom: "16px", marginTop: tab === "login" ? 0 : "8px",
+            }}>
               {error}
             </div>
           )}
 
           <button onClick={handleSubmit} disabled={loading} style={{
-            width: "100%",
-            padding: "14px",
-            background: "#1a4fa0",
-            color: "#fff",
-            border: "none",
-            borderRadius: "30px",
-            fontSize: "16px",
-            fontWeight: 600,
-            cursor: loading ? "not-allowed" : "pointer",
-            opacity: loading ? 0.7 : 1,
-            fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
-            marginTop: "20px",
+            width: "100%", padding: "14px", background: "#1a4fa0", color: "#fff",
+            border: "none", borderRadius: "30px", fontSize: "16px", fontWeight: 600,
+            cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1,
+            fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif", marginTop: "16px",
           }}>
             {loading ? "Please wait..." : tab === "login" ? "Sign in" : "Create account"}
           </button>
 
           <p style={{ textAlign: "center", marginTop: "20px", fontSize: "13px", color: "#666" }}>
             {tab === "login" ? (
-              <>Didn't have an account?{" "}
-                <span onClick={() => setTab("register")} style={{ color: "#1a4fa0", fontWeight: 600, cursor: "pointer" }}>Create account</span>
+              <>Didn&apos;t have an account?{" "}
+                <span onClick={() => { setTab("register"); setError(""); }} style={{ color: "#1a4fa0", fontWeight: 600, cursor: "pointer" }}>Create account</span>
               </>
             ) : (
               <>Already have an account?{" "}
-                <span onClick={() => setTab("login")} style={{ color: "#1a4fa0", fontWeight: 600, cursor: "pointer" }}>Sign in</span>
+                <span onClick={() => { setTab("login"); setError(""); }} style={{ color: "#1a4fa0", fontWeight: 600, cursor: "pointer" }}>Sign in</span>
               </>
             )}
+          </p>
+
+          {/* Local storage notice */}
+          <p style={{ textAlign: "center", marginTop: "16px", fontSize: "11px", color: "#bbb" }}>
+            💾 Data disimpan di browser ini secara lokal
           </p>
         </div>
       </div>
@@ -184,134 +267,119 @@ function AuthPage({ onAuth }: { onAuth: (user: User) => void }) {
   );
 }
 
+// Notes
+
 function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [activeNote, setActiveNote] = useState<Note | null>(null);
-  const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(true);
-  const saveTimer = useRef<NodeJS.Timeout | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const loadNotes = useCallback(async () => {
-    try {
-      const res = await apiFetch("/notes");
-      setNotes(res.data);
-      if (res.data.length > 0) setActiveNote(res.data[0]);
-    } catch { }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { loadNotes(); }, [loadNotes]);
-
-  const createNote = async () => {
-    if (notes.length >= 10) { alert("Maximum 10 notes allowed."); return; }
-    try {
-      const res = await apiFetch("/notes", {
-        method: "POST",
-        body: JSON.stringify({ title: "Untitled", content: "" }),
+  // Load notes from localStorage
+  const refreshNotes = useCallback((keepActiveId?: string) => {
+    const loaded = getNotesByUser(user.id);
+    setNotes(loaded);
+    if (keepActiveId) {
+      const found = loaded.find((n) => n.id === keepActiveId);
+      setActiveNote(found || loaded[0] || null);
+    } else {
+      setActiveNote((prev) => {
+        if (!prev) return loaded[0] || null;
+        return loaded.find((n) => n.id === prev.id) || loaded[0] || null;
       });
-      setNotes((prev) => [res.data, ...prev]);
-      setActiveNote(res.data);
+    }
+  }, [user.id]);
+
+  useEffect(() => { refreshNotes(); }, [refreshNotes]);
+
+  const handleCreate = () => {
+    try {
+      const note = createNote(user.id);
+      setNotes((prev) => [note, ...prev]);
+      setActiveNote(note);
     } catch (e: any) { alert(e.message); }
   };
 
-  const deleteNote = async (id: string) => {
+  const handleDelete = (id: string) => {
     if (!confirm("Delete this note?")) return;
-    try {
-      await apiFetch(`/notes/${id}`, { method: "DELETE" });
-      setNotes((prev) => {
-        const remaining = prev.filter((n) => n._id !== id);
-        setActiveNote(remaining[0] || null);
-        return remaining;
-      });
-    } catch (e: any) { alert(e.message); }
+    deleteNote(id);
+    refreshNotes();
   };
 
-  const updateActive = (field: "title" | "content", value: string) => {
+  const handleUpdateField = (field: "title" | "content", value: string) => {
     if (!activeNote) return;
-    const updated = { ...activeNote, [field]: value };
-    setActiveNote(updated);
-    setNotes((prev) => prev.map((n) => n._id === updated._id ? updated : n));
+    // Optimistic update UI immediately
+    const optimistic = { ...activeNote, [field]: value, updatedAt: new Date().toISOString() };
+    setActiveNote(optimistic);
+    setNotes((prev) => prev.map((n) => n.id === activeNote.id ? optimistic : n));
     setSaved(false);
+
+    // Debounced save
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await apiFetch(`/notes/${updated._id}`, {
-          method: "PUT",
-          body: JSON.stringify({ title: updated.title, content: updated.content }),
-        });
-        setSaved(true);
-      } catch { }
-    }, 800);
+    saveTimer.current = setTimeout(() => {
+      updateNote(activeNote.id, { [field]: value });
+      setSaved(true);
+    }, 600);
   };
 
-  const setColor = async (note: Note, color: string) => {
-    try {
-      await apiFetch(`/notes/${note._id}`, { method: "PUT", body: JSON.stringify({ color }) });
-      setNotes((prev) => prev.map((n) => n._id === note._id ? { ...n, color } : n));
-      if (activeNote?._id === note._id) setActiveNote((prev) => prev ? { ...prev, color } : prev);
-    } catch { }
+  const handleColor = (color: string) => {
+    if (!activeNote) return;
+    const updated = updateNote(activeNote.id, { color });
+    setActiveNote(updated);
+    setNotes((prev) => prev.map((n) => n.id === updated.id ? updated : n));
   };
 
-  const togglePin = async (note: Note) => {
-    try {
-      const res = await apiFetch(`/notes/${note._id}`, {
-        method: "PUT",
-        body: JSON.stringify({ isPinned: !note.isPinned }),
-      });
-      setNotes((prev) => {
-        const updated = prev.map((n) => n._id === note._id ? res.data : n);
-        return [...updated].sort((a, b) => (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0));
-      });
-      if (activeNote?._id === note._id) setActiveNote(res.data);
-    } catch { }
+  const handlePin = () => {
+    if (!activeNote) return;
+    const updated = updateNote(activeNote.id, { isPinned: !activeNote.isPinned });
+    setActiveNote(updated);
+    refreshNotes(updated.id);
   };
 
-  const formatDate = (iso: string) => {
-    return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  };
+  const formatDate = (iso: string) =>
+    new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
   return (
     <div style={{
-      height: "100vh",
-      display: "flex",
+      height: "100vh", display: "flex", overflow: "hidden",
       fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
       background: "#1a1a1a",
-      overflow: "hidden",
     }}>
+      {/* ── Sidebar ── */}
       <div style={{
-        width: "240px",
-        background: "#1a1a1a",
+        width: "240px", background: "#1a1a1a",
         borderRight: "1px solid #2a2a2a",
-        display: "flex",
-        flexDirection: "column",
-        flexShrink: 0,
+        display: "flex", flexDirection: "column", flexShrink: 0,
       }}>
+        {/* Header */}
         <div style={{
-          padding: "18px 16px 12px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          borderBottom: "1px solid #2a2a2a",
+          padding: "18px 16px 12px", display: "flex", alignItems: "center",
+          justifyContent: "space-between", borderBottom: "1px solid #2a2a2a",
         }}>
           <span style={{ fontSize: "17px", fontWeight: 700, color: "#fff", letterSpacing: "-0.02em" }}>
             Notes
           </span>
           <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-            <button onClick={createNote} title="New note" style={{
+            <button onClick={handleCreate} title="New note" style={{
               background: "none", border: "none", color: "#888", cursor: "pointer",
               fontSize: "22px", lineHeight: 1, padding: "2px 6px", borderRadius: "6px",
             }}>+</button>
-            <button onClick={onLogout} title={`Logout (${user.name})`} style={{
-              width: "28px", height: "28px", borderRadius: "50%",
-              background: "#2d4a3e", border: "none", cursor: "pointer",
-              color: "#8bc4a0", fontSize: "12px", fontWeight: 700,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}>
+            <button
+              onClick={onLogout}
+              title={`Logout (${user.name})`}
+              style={{
+                width: "28px", height: "28px", borderRadius: "50%",
+                background: "#2d4a3e", border: "none", cursor: "pointer",
+                color: "#8bc4a0", fontSize: "12px", fontWeight: 700,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+            >
               {user.name.charAt(0).toUpperCase()}
             </button>
           </div>
         </div>
 
+        {/* Greeting */}
         <div style={{ padding: "12px 14px 8px" }}>
           <div style={{ background: "#2d4a3e", borderRadius: "8px", padding: "10px 12px" }}>
             <div style={{ fontSize: "11px", color: "#6aaa80" }}>Hi, {user.name.split(" ")[0]}!</div>
@@ -321,32 +389,30 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
           </div>
         </div>
 
+        {/* Note list */}
         <div style={{ flex: 1, overflowY: "auto", padding: "4px 8px" }}>
-          {loading ? (
-            <div style={{ padding: "20px 8px", color: "#555", fontSize: "13px" }}>Loading...</div>
-          ) : notes.length === 0 ? (
+          {notes.length === 0 ? (
             <div style={{ padding: "20px 8px", color: "#555", fontSize: "13px", lineHeight: 1.5 }}>
               No notes yet.<br />Click + to create one.
             </div>
           ) : (
             notes.map((note) => {
-              const isActive = activeNote?._id === note._id;
+              const isActive = activeNote?.id === note.id;
               return (
                 <div
-                  key={note._id}
+                  key={note.id}
                   onClick={() => setActiveNote(note)}
                   style={{
-                    padding: "10px 12px",
-                    cursor: "pointer",
+                    padding: "10px 12px", cursor: "pointer",
                     background: isActive ? note.color : "transparent",
-                    borderRadius: "8px",
-                    marginBottom: "2px",
-                    transition: "background 0.15s",
-                    position: "relative",
+                    borderRadius: "8px", marginBottom: "2px",
+                    transition: "background 0.15s", position: "relative",
                   }}
                 >
                   {note.isPinned && (
-                    <span style={{ position: "absolute", top: "8px", right: "10px", fontSize: "10px", color: isActive ? "#888" : "#555" }}>📌</span>
+                    <span style={{ position: "absolute", top: "8px", right: "10px", fontSize: "10px", color: isActive ? "#888" : "#555" }}>
+                      📌
+                    </span>
                   )}
                   <div style={{
                     fontSize: "13px", fontWeight: 600,
@@ -372,41 +438,46 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
         </div>
       </div>
 
+      {/* ── Editor ── */}
       {activeNote ? (
         <div style={{ flex: 1, background: activeNote.color, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {/* Toolbar */}
           <div style={{
-            padding: "10px 20px",
-            borderBottom: "1px solid rgba(0,0,0,0.08)",
+            padding: "10px 20px", borderBottom: "1px solid rgba(0,0,0,0.08)",
             display: "flex", alignItems: "center", gap: "8px",
-            background: "rgba(255,255,255,0.2)",
+            background: "rgba(255,255,255,0.25)", flexWrap: "wrap",
           }}>
             {NOTE_COLORS.map((c) => (
-              <button key={c} onClick={() => setColor(activeNote, c)} style={{
+              <button key={c} onClick={() => handleColor(c)} style={{
                 width: "18px", height: "18px", borderRadius: "50%", background: c,
                 border: activeNote.color === c ? "2px solid #333" : "1px solid rgba(0,0,0,0.18)",
                 cursor: "pointer", padding: 0, flexShrink: 0,
               }} />
             ))}
             <div style={{ flex: 1 }} />
-            <span style={{ fontSize: "11px", color: "#999" }}>{saved ? "Saved" : "Saving..."}</span>
-            <button onClick={() => togglePin(activeNote)} style={{
+            <span style={{ fontSize: "11px", color: "#888" }}>
+              {saved ? "✓ Saved" : "Saving..."}
+            </span>
+            <button onClick={handlePin} style={{
               background: activeNote.isPinned ? "rgba(0,0,0,0.1)" : "none",
               border: "1px solid rgba(0,0,0,0.12)", borderRadius: "6px",
-              padding: "4px 8px", cursor: "pointer", fontSize: "13px", color: "#555",
+              padding: "4px 10px", cursor: "pointer", fontSize: "12px", color: "#555",
             }}>
               {activeNote.isPinned ? "📌 Pinned" : "📌 Pin"}
             </button>
-            <button onClick={() => deleteNote(activeNote._id)} style={{
-              background: "none", border: "1px solid rgba(180,0,0,0.2)",
-              borderRadius: "6px", padding: "4px 10px", cursor: "pointer", fontSize: "12px", color: "#c00",
+            <button onClick={() => handleDelete(activeNote.id)} style={{
+              background: "none", border: "1px solid rgba(180,0,0,0.25)",
+              borderRadius: "6px", padding: "4px 10px", cursor: "pointer",
+              fontSize: "12px", color: "#c00",
             }}>
               Delete
             </button>
           </div>
 
+          {/* Title */}
           <input
             value={activeNote.title}
-            onChange={(e) => updateActive("title", e.target.value)}
+            onChange={(e) => handleUpdateField("title", e.target.value)}
             placeholder="Title"
             style={{
               padding: "22px 32px 8px", fontSize: "24px", fontWeight: 700,
@@ -416,9 +487,10 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
             }}
           />
 
+          {/* Content */}
           <textarea
             value={activeNote.content}
-            onChange={(e) => updateActive("content", e.target.value)}
+            onChange={(e) => handleUpdateField("content", e.target.value)}
             placeholder="Start writing..."
             style={{
               flex: 1, padding: "4px 32px 32px", fontSize: "15px", lineHeight: 1.75,
@@ -434,7 +506,7 @@ function NotesApp({ user, onLogout }: { user: User; onLogout: () => void }) {
         }}>
           <div style={{ fontSize: "48px", opacity: 0.3 }}>📝</div>
           <div style={{ fontSize: "15px", color: "#555" }}>Select a note or create a new one</div>
-          <button onClick={createNote} style={{
+          <button onClick={handleCreate} style={{
             padding: "10px 22px", background: "#2d4a3e", color: "#8bc4a0",
             border: "none", borderRadius: "8px", cursor: "pointer", fontSize: "14px",
             fontFamily: "Helvetica Neue, Helvetica, Arial, sans-serif",
@@ -452,26 +524,20 @@ export default function Page() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const res = await apiFetch("/auth/me");
-        setUser(res.data);
-      } catch {
-        setUser(null);
-      }
-      setReady(true);
-    };
-    checkAuth();
+    // Restore session from localStorage
+    const sessionUserId = DB.getSession();
+    if (sessionUserId) {
+      const users = DB.getUsers();
+      const found = users.find((u) => u.id === sessionUserId);
+      if (found) setUser(found);
+    }
+    setReady(true);
   }, []);
 
-  const handleAuth = (u: User) => {
-    setUser(u);
-  };
+  const handleAuth = (u: User) => setUser(u);
 
-  const handleLogout = async () => {
-    try {
-      await apiFetch("/auth/logout");
-    } catch {}
+  const handleLogout = () => {
+    DB.clearSession();
     setUser(null);
   };
 
